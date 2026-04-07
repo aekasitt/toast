@@ -6,16 +6,16 @@ use std::sync::Arc;
 
 // third-party crates
 use async_trait::async_trait;
-use axum::extract::{Json, Path, State};
+use axum::extract::{FromRequestParts, Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{Router, delete, get};
+use http::request::Parts;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use toasty::{Db, Model};
 use toasty_driver_sqlite::Sqlite;
 use tokio::net::TcpListener;
-use tokio::sync::RwLock;
 use uuid::Uuid;
 
 #[derive(Clone, Model, Serialize)]
@@ -63,116 +63,121 @@ impl IntoResponse for TodoError {
 }
 
 #[async_trait]
-trait TodoService: Send + Sync {
-  async fn create(&self, input: CreateTodo) -> Result<Todo, TodoError>;
-  async fn complete(&self, slug: Uuid) -> Result<Todo, TodoError>;
-  async fn delete(&self, slug: Uuid) -> Result<(), TodoError>;
-  async fn get(&self, slug: Uuid) -> Result<Todo, TodoError>;
-  async fn list(&self) -> Result<Vec<Todo>, TodoError>;
+trait TodoServiceSchema: Send + Sync {
+  async fn create(&self, db: &mut Db, input: CreateTodo) -> Result<Todo, TodoError>;
+  async fn complete(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError>;
+  async fn delete(&self, db: &mut Db, slug: Uuid) -> Result<(), TodoError>;
+  async fn get(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError>;
+  async fn list(&self, db: &mut Db) -> Result<Vec<Todo>, TodoError>;
 }
 
-struct SqliteTodoService {
-  db: RwLock<Db>,
-}
-impl SqliteTodoService {
-  async fn new(database_url: &str) -> Result<Self, toasty::Error> {
-    let driver = Sqlite::new(database_url)?;
-    let db = Db::builder()
-      .models(toasty::models!(Todo))
-      .build(driver)
-      .await?;
-    match db.push_schema().await {
-      Ok(_) => println!("✅ Migrated models into database tables."),
-      Err(_) => println!("⚠️ Model tables already existed."),
-    };
-    Ok(Self {
-      db: RwLock::new(db),
-    })
-  }
-}
-
+struct TodoService;
 #[async_trait]
-impl TodoService for SqliteTodoService {
-  async fn create(&self, input: CreateTodo) -> Result<Todo, TodoError> {
-    let mut db = self.db.write().await;
+impl TodoServiceSchema for TodoService {
+  async fn create(&self, db: &mut Db, input: CreateTodo) -> Result<Todo, TodoError> {
     let todo = toasty::create!(Todo {
       completed: false,
       title: input.title
     })
-    .exec(&mut *db)
+    .exec(db)
     .await?;
     Ok(todo)
   }
-  async fn complete(&self, slug: Uuid) -> Result<Todo, TodoError> {
-    let mut db = self.db.write().await;
-    let mut todo = Todo::get_by_slug(&mut *db, &slug).await?;
-    Todo::update(&mut todo)
-      .completed(true)
-      .exec(&mut *db)
-      .await?;
+  async fn complete(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError> {
+    let mut todo = Todo::get_by_slug(db, &slug).await?;
+    Todo::update(&mut todo).completed(true).exec(db).await?;
     Ok(todo)
   }
-  async fn delete(&self, slug: Uuid) -> Result<(), TodoError> {
-    let mut db = self.db.write().await;
-    let todo = Todo::get_by_slug(&mut *db, &slug).await?;
-    todo.delete().exec(&mut *db).await?;
+  async fn delete(&self, db: &mut Db, slug: Uuid) -> Result<(), TodoError> {
+    let todo = Todo::get_by_slug(db, &slug).await?;
+    todo.delete().exec(db).await?;
     Ok(())
   }
-  async fn get(&self, slug: Uuid) -> Result<Todo, TodoError> {
-    let mut db = self.db.write().await;
-    let todo = Todo::get_by_slug(&mut *db, &slug).await?;
+  async fn get(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError> {
+    let todo = Todo::get_by_slug(db, &slug).await?;
     Ok(todo)
   }
-  async fn list(&self) -> Result<Vec<Todo>, TodoError> {
-    let mut db = self.db.write().await;
-    Ok(Todo::all().exec(&mut *db).await?)
+  async fn list(&self, db: &mut Db) -> Result<Vec<Todo>, TodoError> {
+    Ok(Todo::all().exec(db).await?)
   }
 }
 
 async fn complete_todo(
-  State(service): State<Arc<dyn TodoService>>,
+  State(context): State<Context>,
+  Database(mut db): Database,
   Path(slug): Path<Uuid>,
 ) -> Result<Json<Todo>, TodoError> {
-  service.complete(slug).await.map(Json)
+  context.service.complete(&mut db, slug).await.map(Json)
 }
 async fn delete_todo(
-  State(service): State<Arc<dyn TodoService>>,
+  State(context): State<Context>,
+  Database(mut db): Database,
   Path(slug): Path<Uuid>,
 ) -> Result<(StatusCode, Json<()>), TodoError> {
-  let deleted = service.delete(slug).await?;
-  Ok((StatusCode::NO_CONTENT, Json(deleted)))
+  context.service.delete(&mut db, slug).await?;
+  Ok((StatusCode::NO_CONTENT, Json(())))
 }
 async fn get_todo(
-  State(service): State<Arc<dyn TodoService>>,
+  State(context): State<Context>,
+  Database(mut db): Database,
   Path(slug): Path<Uuid>,
 ) -> Result<Json<Todo>, TodoError> {
-  service.get(slug).await.map(Json)
+  context.service.get(&mut db, slug).await.map(Json)
 }
 async fn create_todo(
-  State(service): State<Arc<dyn TodoService>>,
+  State(context): State<Context>,
+  Database(mut db): Database,
   Json(input): Json<CreateTodo>,
 ) -> Result<(StatusCode, Json<Todo>), TodoError> {
-  let todo = service.create(input).await?;
+  let todo = context.service.create(&mut db, input).await?;
   Ok((StatusCode::CREATED, Json(todo)))
 }
 async fn list_todos(
-  State(service): State<Arc<dyn TodoService>>,
+  State(context): State<Context>,
+  Database(mut db): Database,
 ) -> Result<Json<Vec<Todo>>, TodoError> {
-  service.list().await.map(Json)
+  context.service.list(&mut db).await.map(Json)
+}
+
+// Dependency injection
+pub struct Database(pub Db);
+impl FromRequestParts<Context> for Database {
+  type Rejection = TodoError;
+  fn from_request_parts(
+    _: &mut Parts,
+    context: &Context,
+  ) -> impl std::future::Future<Output = Result<Self, Self::Rejection>> + Send {
+    async { Ok(Database(context.database.clone())) }
+  }
+}
+#[derive(Clone)]
+struct Context {
+  database: Db,
+  service: Arc<dyn TodoServiceSchema>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let db_path = current_dir()?.join("todos.db");
-  let db_url = format!("sqlite://{}", db_path.display());
-  let service = Arc::new(SqliteTodoService::new(&db_url).await?);
+  let database_path = current_dir()?.join("todos.db");
+  let database_url = format!("sqlite://{}", database_path.display());
+  let driver = Sqlite::new(database_url)?;
+  let database = Db::builder()
+    .models(toasty::models!(Todo))
+    .build(driver)
+    .await?;
+  match database.push_schema().await {
+    Ok(_) => println!("✅ Migrated models into database tables."),
+    Err(_) => println!("⚠️ Model tables already existed."),
+  };
+  let service: Arc<dyn TodoServiceSchema> = Arc::new(TodoService {});
+  let context = Context { database, service };
   let app = Router::new()
     .route("/todos", get(list_todos).post(create_todo))
     .route(
       "/todos/{slug}",
       delete(delete_todo).get(get_todo).put(complete_todo),
     )
-    .with_state(service);
+    .with_state(context);
   let listener = TcpListener::bind("127.0.0.1:3000").await?;
   println!("✅ Listening on http://localhost:3000");
   axum::serve(listener, app).await?;
