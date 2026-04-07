@@ -1,0 +1,21 @@
+### build ###
+/target
+
+
+### database ###
+todos.db
+
+
+### macos ###
+.DS_Store
+
+
+### taskrunner ###
+cargo.pid
+
+
+### workspace ###
+.cursor
+.idea
+.ignore
+.vscode

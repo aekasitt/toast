@@ -1,0 +1,16 @@
+[dependencies]
+async-trait = '0.1.89'
+axum = { features = ['json', 'tokio'], version = '0.8.8' }
+rusqlite = '0.39.0'
+serde = { features = ['derive'], version = '1.0.228' }
+serde_json = '1.0.149'
+toasty = { features = ['sqlite'], version = '0.3.0' }
+toasty-driver-sqlite = '0.3.0'
+tokio = '1.51.0'
+uuid = { features = ['serde', 'v4'], version = '1.23.0' }
+
+
+[package]
+name = 'toast'
+edition = '2024'
+version = '0.1.0'
