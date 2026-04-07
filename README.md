@@ -13,7 +13,7 @@ TBD;
 
 ## Acknowledgements
 
-* [Essay] (Build a Single-File Rust Web API with SQLite](https://hamy.xyz/blog/2026-03_rust-webapi-db)
+* [Essay] [Build a Single-File Rust Web API with SQLite](https://hamy.xyz/blog/2026-03_rust-webapi-db)
   by [Hamilton Greene](https://hamy.xyz)
 * [Toasty, an async ORM for Rust, is now on crates.io](https://tokio.rs/blog/2026-04-03-toasty-released)
   by [tokio team](https://tokio.rs) on April 3rd, 2026.
