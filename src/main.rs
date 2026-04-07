@@ -18,6 +18,7 @@ use toasty_driver_sqlite::Sqlite;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
+// Models
 #[derive(Clone, Model, Serialize)]
 struct Todo {
   completed: bool,
@@ -26,12 +27,12 @@ struct Todo {
   slug: Uuid,
   title: String,
 }
-
 #[derive(Deserialize)]
 struct CreateTodo {
   title: String,
 }
 
+// Error handling
 enum TodoError {
   Internal,
   NotFound(toasty::Error),
@@ -62,84 +63,92 @@ impl IntoResponse for TodoError {
   }
 }
 
+// Service schema and struct
 #[async_trait]
 trait TodoServiceSchema: Send + Sync {
-  async fn create(&self, db: &mut Db, input: CreateTodo) -> Result<Todo, TodoError>;
-  async fn complete(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError>;
-  async fn delete(&self, db: &mut Db, slug: Uuid) -> Result<(), TodoError>;
-  async fn get(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError>;
-  async fn list(&self, db: &mut Db) -> Result<Vec<Todo>, TodoError>;
+  async fn create(&self, database: &mut Db, input: CreateTodo) -> Result<Todo, TodoError>;
+  async fn complete(&self, database: &mut Db, slug: Uuid) -> Result<Todo, TodoError>;
+  async fn delete(&self, database: &mut Db, slug: Uuid) -> Result<(), TodoError>;
+  async fn get(&self, database: &mut Db, slug: Uuid) -> Result<Todo, TodoError>;
+  async fn list(&self, database: &mut Db) -> Result<Vec<Todo>, TodoError>;
 }
-
 struct TodoService;
 #[async_trait]
 impl TodoServiceSchema for TodoService {
-  async fn create(&self, db: &mut Db, input: CreateTodo) -> Result<Todo, TodoError> {
+  async fn create(&self, database: &mut Db, input: CreateTodo) -> Result<Todo, TodoError> {
     let todo = toasty::create!(Todo {
       completed: false,
       title: input.title
     })
-    .exec(db)
+    .exec(database)
     .await?;
     Ok(todo)
   }
-  async fn complete(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError> {
-    let mut todo = Todo::get_by_slug(db, &slug).await?;
-    Todo::update(&mut todo).completed(true).exec(db).await?;
+  async fn complete(&self, database: &mut Db, slug: Uuid) -> Result<Todo, TodoError> {
+    let mut todo = Todo::get_by_slug(database, &slug).await?;
+    Todo::update(&mut todo)
+      .completed(true)
+      .exec(database)
+      .await?;
     Ok(todo)
   }
-  async fn delete(&self, db: &mut Db, slug: Uuid) -> Result<(), TodoError> {
-    let todo = Todo::get_by_slug(db, &slug).await?;
-    todo.delete().exec(db).await?;
+  async fn delete(&self, database: &mut Db, slug: Uuid) -> Result<(), TodoError> {
+    let todo = Todo::get_by_slug(database, &slug).await?;
+    todo.delete().exec(database).await?;
     Ok(())
   }
-  async fn get(&self, db: &mut Db, slug: Uuid) -> Result<Todo, TodoError> {
-    let todo = Todo::get_by_slug(db, &slug).await?;
+  async fn get(&self, database: &mut Db, slug: Uuid) -> Result<Todo, TodoError> {
+    let todo = Todo::get_by_slug(database, &slug).await?;
     Ok(todo)
   }
-  async fn list(&self, db: &mut Db) -> Result<Vec<Todo>, TodoError> {
-    Ok(Todo::all().exec(db).await?)
+  async fn list(&self, database: &mut Db) -> Result<Vec<Todo>, TodoError> {
+    Ok(Todo::all().exec(database).await?)
   }
 }
 
+// Endpoints
 async fn complete_todo(
   State(context): State<Context>,
-  Database(mut db): Database,
+  Database(mut database): Database,
   Path(slug): Path<Uuid>,
 ) -> Result<Json<Todo>, TodoError> {
-  context.service.complete(&mut db, slug).await.map(Json)
+  context
+    .todosvc
+    .complete(&mut database, slug)
+    .await
+    .map(Json)
 }
 async fn delete_todo(
   State(context): State<Context>,
-  Database(mut db): Database,
+  Database(mut database): Database,
   Path(slug): Path<Uuid>,
 ) -> Result<(StatusCode, Json<()>), TodoError> {
-  context.service.delete(&mut db, slug).await?;
+  context.todosvc.delete(&mut database, slug).await?;
   Ok((StatusCode::NO_CONTENT, Json(())))
 }
 async fn get_todo(
   State(context): State<Context>,
-  Database(mut db): Database,
+  Database(mut database): Database,
   Path(slug): Path<Uuid>,
 ) -> Result<Json<Todo>, TodoError> {
-  context.service.get(&mut db, slug).await.map(Json)
+  context.todosvc.get(&mut database, slug).await.map(Json)
 }
 async fn create_todo(
   State(context): State<Context>,
-  Database(mut db): Database,
+  Database(mut database): Database,
   Json(input): Json<CreateTodo>,
 ) -> Result<(StatusCode, Json<Todo>), TodoError> {
-  let todo = context.service.create(&mut db, input).await?;
+  let todo = context.todosvc.create(&mut database, input).await?;
   Ok((StatusCode::CREATED, Json(todo)))
 }
 async fn list_todos(
   State(context): State<Context>,
-  Database(mut db): Database,
+  Database(mut database): Database,
 ) -> Result<Json<Vec<Todo>>, TodoError> {
-  context.service.list(&mut db).await.map(Json)
+  context.todosvc.list(&mut database).await.map(Json)
 }
 
-// Dependency injection
+// Context & dependency injection
 pub struct Database(pub Db);
 impl FromRequestParts<Context> for Database {
   type Rejection = TodoError;
@@ -153,9 +162,10 @@ impl FromRequestParts<Context> for Database {
 #[derive(Clone)]
 struct Context {
   database: Db,
-  service: Arc<dyn TodoServiceSchema>,
+  todosvc: Arc<dyn TodoServiceSchema>,
 }
 
+// Lifespan
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
   let database_path = current_dir()?.join("todos.db");
@@ -169,8 +179,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(_) => println!("✅ Migrated models into database tables."),
     Err(_) => println!("⚠️ Model tables already existed."),
   };
-  let service: Arc<dyn TodoServiceSchema> = Arc::new(TodoService {});
-  let context = Context { database, service };
+  let todosvc: Arc<dyn TodoServiceSchema> = Arc::new(TodoService {});
+  let context = Context { database, todosvc };
   let app = Router::new()
     .route("/todos", get(list_todos).post(create_todo))
     .route(
